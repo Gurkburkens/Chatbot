@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="sv">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CryptoBot Pro – Automatisk Krypto Trading</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+        href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;600&display=swap"
+        rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js" defer></script>
+    <script src="app.js" defer></script>
+</head>
+
+<body>
+
+    <nav>
+        <div class="nav-logo">CRYPTOBOT //</div>
+        <div class="nav-links">
+            <a href="#live">Live Graf</a>
+            <a href="#kalkylator">Kalkylator</a>
+            <a href="#strategi">Strategi</a>
+            <a href="#indikatorer">Indikatorer</a>
+            <a href="#flode">Hur det fungerar</a>
+        </div>
+        <div class="live-pill">
+            <div class="live-dot"></div>
+            LIVE DATA
+        </div>
+    </nav>
+
+    <section class="hero">
+        <div class="hero-eyebrow">Automatisk krypto trading · BTC & ETH · Binance</div>
+        <h1>Din pengar jobbar<br>medan du <em>sover</em></h1>
+        <p>En fullt automatiserad tradingbot som kombinerar DCA, Mean Reversion, RSI och ADX för att maximera din
+            avkastning – utan att du behöver göra ett enda klick.</p>
+        <div class="hero-stats">
+            <div class="hero-stat">
+                <div class="hero-stat-val" id="hero-btc">–</div>
+                <div class="hero-stat-lbl">BTC/USDT live</div>
+            </div>
+            <div class="hero-stat">
+                <div class="hero-stat-val" id="hero-eth">–</div>
+                <div class="hero-stat-lbl">ETH/USDT live</div>
+            </div>
+            <div class="hero-stat">
+                <div class="hero-stat-val" id="hero-rsi">–</div>
+                <div class="hero-stat-lbl">RSI just nu</div>
+            </div>
+            <div class="hero-stat">
+                <div class="hero-stat-val green" id="hero-signal">–</div>
+                <div class="hero-stat-lbl">Botsignal</div>
+            </div>
+        </div>
+    </section>
+
+    <section class="chart-section" id="live">
+        <div class="chart-section-header">
+            <div>
+                <h2>Marknaden i realtid</h2>
+                <p>Prisgraf med botens köp- och säljsignaler – uppdateras var 20:e sekund</p>
+            </div>
+            <div class="sym-tabs">
+                <button class="sym-tab active" onclick="byttSymbol('BTCUSDT', this)">BTC</button>
+                <button class="sym-tab" onclick="byttSymbol('ETHUSDT', this)">ETH</button>
+            </div>
+        </div>
+        <div class="big-chart-card">
+            <div class="big-chart-top">
+                <div class="price-display">
+                    <div class="price-big" id="live-price">–</div>
+                    <div class="price-change pos" id="live-change">Laddar...</div>
+                </div>
+                <div class="price-right">
+                    <div class="updated-label" id="live-updated">–</div>
+                    <div class="signal-label" id="live-signal-box">–</div>
+                </div>
+            </div>
+            <div class="chart-legend">
+                <span><span class="leg-dot gold-dot"></span>Pris</span>
+                <span><span class="leg-dot blue-dot"></span>MA20</span>
+                <span><span class="leg-dot green-dot round"></span>KÖP-signal</span>
+                <span><span class="leg-dot red-dot round"></span>SÄLJ-signal</span>
+            </div>
+            <div class="big-canvas-wrap">
+                <canvas id="bigChart"></canvas>
+            </div>
+            <div class="metric-strip">
+                <div class="metric-tile">
+                    <div class="metric-tile-label">RSI (14)</div>
+                    <div class="metric-tile-value gold" id="m-rsi">–</div>
+                </div>
+                <div class="metric-tile">
+                    <div class="metric-tile-label">ADX (14)</div>
+                    <div class="metric-tile-value gold" id="m-adx">–</div>
+                </div>
+                <div class="metric-tile">
+                    <div class="metric-tile-label">MA20-avvikelse</div>
+                    <div class="metric-tile-value gold" id="m-ma">–</div>
+                </div>
+                <div class="metric-tile">
+                    <div class="metric-tile-label">Kill switch</div>
+                    <div class="metric-tile-value pos" id="m-kill">–</div>
+                </div>
+                <div class="metric-tile">
+                    <div class="metric-tile-label">EMA-korsning</div>
+                    <div class="metric-tile-value gold" id="m-ema">–</div>
+                </div>
+                <div class="metric-tile">
+                    <div class="metric-tile-label">Nästa DCA-köp</div>
+                    <div class="metric-tile-value gold">Måndag 09:00</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="calc-section" id="kalkylator">
+        <div class="calc-card">
+            <h2>Spara-kalkylator</h2>
+            <p>Se vad din bot hade genererat om du börjat spara med den för ett tag sedan. Baserat på historisk data
+                direkt från Binance.</p>
+            <div class="calc-inputs">
+                <div class="inp-group"><label>Startkapital (kr)</label><input type="number" id="c-kapital" value="1000"
+                        min="100" step="100" /></div>
+                <div class="inp-group"><label>Månadsinsättning (kr)</label><input type="number" id="c-manad"
+                        value="1500" min="0" step="100" /></div>
+                <div class="inp-group">
+                    <label>Valuta</label>
+                    <select id="c-symbol">
+                        <option value="BTCUSDT">Bitcoin (BTC)</option>
+                        <option value="ETHUSDT">Ethereum (ETH)</option>
+                    </select>
+                </div>
+                <div class="inp-group">
+                    <label>Tidsperiod</label>
+                    <select id="c-period">
+                        <option value="30">1 månad sedan</option>
+                        <option value="90" selected>3 månader sedan</option>
+                        <option value="180">6 månader sedan</option>
+                        <option value="365">1 år sedan</option>
+                        <option value="730">2 år sedan</option>
+                    </select>
+                </div>
+            </div>
+            <button class="run-calc-btn" id="calc-btn" onclick="körKalkylator()">Beräkna vad boten hade
+                genererat</button>
+            <div class="calc-results" id="calc-results">
+                <div class="result-big" id="result-big"></div>
+                <div class="calc-chart-wrap"><canvas id="calcChart"></canvas></div>
+                <div class="trades-count-label" id="trades-count-label">0 affärer</div>
+                <div class="trades-mini" id="trades-mini"></div>
+            </div>
+        </div>
+    </section>
+
+    <section class="explain-section" id="strategi">
+        <h2>Strategin bakom boten</h2>
+        <p>Boten kombinerar fyra beprövade tekniker för att köpa smart, sälja vid rätt tillfälle och skydda ditt kapital
+            automatiskt.</p>
+        <div class="explain-grid">
+            <div class="explain-card">
+                <div class="explain-icon icon-blue">📅</div>
+                <h3>DCA – Dollar Cost Averaging</h3>
+                <p>Varje måndag köper boten ett fast belopp BTC eller ETH, oavsett vad priset är. Historisk forskning
+                    visar att detta konsekvent slår engångsinvesteringar i volatila marknader – du köper billigare i
+                    genomsnitt eftersom du automatiskt köper mer när priset är lågt.</p>
+                <div class="tag-row"><span class="etag etag-neu">Varje måndag 09:00</span><span
+                        class="etag etag-buy">Lägre genomsnittskostnad</span></div>
+            </div>
+            <div class="explain-card">
+                <div class="explain-icon icon-green">📉</div>
+                <h3>Mean Reversion – Köp dipparna</h3>
+                <p>När priset faller mer än 5% under sitt 20-dagars genomsnitt triggas ett extra köp automatiskt.
+                    Statistiskt tenderar Bitcoin att återgå till sitt medelvärde efter stora rörelser – boten utnyttjar
+                    detta systematiskt utan att du behöver hänga framför skärmen.</p>
+                <div class="tag-row"><span class="etag etag-neu">Dipp &gt;5% under MA20</span><span
+                        class="etag etag-buy">Extra köp automatiskt</span></div>
+            </div>
+            <div class="explain-card">
+                <div class="explain-icon icon-gold">📊</div>
+                <h3>RSI-filter – Undvik överhettade marknader</h3>
+                <p>RSI (Relative Strength Index) mäter hur snabbt priset rör sig. Under 38 = marknaden är "oversold" och
+                    historiskt ett bra köptillfälle. Över 63 = marknaden är "overbought" och boten tar hem vinsten.</p>
+                <div class="tag-row"><span class="etag etag-buy">RSI &lt;38 = köpsignal</span><span
+                        class="etag etag-sell">RSI &gt;63 = säljsignal</span></div>
+            </div>
+            <div class="explain-card">
+                <div class="explain-icon icon-purple">📈</div>
+                <h3>ADX-filter – Handla bara i starka trender</h3>
+                <p>ADX (Average Directional Index) mäter trendens styrka, inte riktning. Under 25 = svag trend med hög
+                    risk för falska signaler. Boten väntar tills ADX är över 25 innan den agerar på EMA-korsningar.</p>
+                <div class="tag-row"><span class="etag etag-buy">ADX &gt;25 = stark trend</span><span
+                        class="etag etag-neu">Filtrar bort falskt brus</span></div>
+            </div>
+            <div class="explain-card">
+                <div class="explain-icon icon-red">🛡️</div>
+                <h3>Trailing Stop-Loss – Skydda dina vinster</h3>
+                <p>Istället för en fast stop-loss "hänger" boten med priset uppåt. Om priset stiger 20% men sedan faller
+                    15% säljer boten automatiskt och låser in din vinst. Du behöver inte välja när – boten skyddar dig
+                    automatiskt.</p>
+                <div class="tag-row"><span class="etag etag-neu">15% rörlig stop-loss</span><span
+                        class="etag etag-sell">Säljer automatiskt</span></div>
+            </div>
+            <div class="explain-card">
+                <div class="explain-icon icon-teal">🔴</div>
+                <h3>Automatisk Kill Switch – Kraschskydd</h3>
+                <p>Om BTC/ETH faller mer än 15% på ett dygn pausar boten alla köp. Vid -25% på en vecka säljer den allt
+                    och väntar. Boten startar sedan om automatiskt när marknaden stabiliserats i 3+ dagar.</p>
+                <div class="tag-row"><span class="etag etag-sell">-15%/dygn = pausa</span><span
+                        class="etag etag-sell">-25%/vecka = sälj allt</span><span
+                        class="etag etag-buy">Auto-återstart</span></div>
+            </div>
+        </div>
+    </section>
+
+    <section class="ind-vis-section" id="indikatorer">
+        <h2>Indikatorer just nu</h2>
+        <p>Se botens tre huvudindikatorer i realtid och förstå exakt vad de säger om marknaden.</p>
+        <div class="ind-grid">
+            <div class="ind-card">
+                <div class="ind-card-top"><span class="ind-card-name">RSI – Relative Strength Index</span><span
+                        class="ind-badge ihold" id="rsi-badge">–</span></div>
+                <div class="ind-big-val" id="rsi-big">–</div>
+                <div class="ind-gauge">
+                    <div class="ind-gauge-fill" id="rsi-fill" style="width:50%"></div>
+                </div>
+                <div class="ind-zones"><span>0 – Extremt översålt</span><span>50 – Neutralt</span><span>100 – Extremt
+                        överköpt</span></div>
+                <div class="ind-explain">RSI mäter hur snabbt och kraftigt priset förändrats de senaste 14 dagarna.
+                    <strong>Under 38</strong> innebär att marknaden sålts av aggressivt och ett studs uppåt är
+                    statistiskt troligt. <strong>Över 63</strong> innebär att köpare drivit upp priset snabbt – boten
+                    tar hem vinsten.
+                </div>
+            </div>
+            <div class="ind-card">
+                <div class="ind-card-top"><span class="ind-card-name">ADX – Average Directional Index</span><span
+                        class="ind-badge ihold" id="adx-badge">–</span></div>
+                <div class="ind-big-val" id="adx-big">–</div>
+                <div class="ind-gauge">
+                    <div class="ind-gauge-fill" id="adx-fill" style="width:0%"></div>
+                </div>
+                <div class="ind-zones"><span>0 – Ingen trend</span><span>25 – Stark nog</span><span>50+ – Mycket
+                        stark</span></div>
+                <div class="ind-explain">ADX mäter <strong>styrkan</strong> i en trend – inte riktningen. <strong>Under
+                        25</strong> är marknaden sidleds och signaler ger ofta falska utfall – boten ignorerar
+                    EMA-korsningar tills ADX är tillräckligt hög.</div>
+            </div>
+            <div class="ind-card">
+                <div class="ind-card-top"><span class="ind-card-name">MA20 – Prisavvikelse från medel</span><span
+                        class="ind-badge ihold" id="ma-badge">–</span></div>
+                <div class="ind-big-val" id="ma-big">–</div>
+                <div class="ind-gauge">
+                    <div class="ind-gauge-fill" id="ma-fill" style="width:50%"></div>
+                </div>
+                <div class="ind-zones"><span>-15% – Stor dipp</span><span>0% – På medel</span><span>+15% – Över
+                        medel</span></div>
+                <div class="ind-explain">Visar hur långt nuvarande priset avviker från det rullande 20-dagars
+                    genomsnittet. När avvikelsen är <strong>–5% eller mer</strong> kombinerat med lågt RSI triggar boten
+                    ett extra köp.</div>
+            </div>
+        </div>
+    </section>
+
+    <section class="timeline-section" id="flode">
+        <h2>Hur boten tänker</h2>
+        <p>Från prisdata till order – botens beslutsflöde steg för steg.</p>
+        <div class="timeline">
+            <div class="tl-item">
+                <div class="tl-num">01</div>
+                <div class="tl-body">
+                    <h4>Hämtar marknadsdata var 10:e minut</h4>
+                    <p>Boten hämtar historisk OHLCV-data från Binance API och beräknar RSI, ADX, EMA20, EMA50 och MA20
+                        för en fullständig bild av marknadsläget.</p>
+                </div>
+            </div>
+            <div class="tl-item">
+                <div class="tl-num">02</div>
+                <div class="tl-body">
+                    <h4>Kontrollerar kill switch-status</h4>
+                    <p>Första steget är alltid att kolla om kill switch är aktiv. Om marknaden fallit kraftigt väntar
+                        boten på stabilisering innan den gör något annat.</p>
+                </div>
+            </div>
+            <div class="tl-item">
+                <div class="tl-num">03</div>
+                <div class="tl-body">
+                    <h4>Kontrollerar trailing stop-loss</h4>
+                    <p>Om boten har ett aktivt innehav kontrolleras om priset fallit mer än 15% från dess högsta nivå.
+                        Har det det säljer boten omedelbart och skyddar ditt kapital.</p>
+                </div>
+            </div>
+            <div class="tl-item">
+                <div class="tl-num">04</div>
+                <div class="tl-body">
+                    <h4>Analyserar köp- och säljsignaler</h4>
+                    <p>Boten kontrollerar i tur och ordning: RSI-sälj, Mean Reversion-köp och EMA-korsningsköp. Första
+                        matchande signal vinner och resulterar i en order.</p>
+                </div>
+            </div>
+            <div class="tl-item">
+                <div class="tl-num">05</div>
+                <div class="tl-body">
+                    <h4>Placerar order via Binance API</h4>
+                    <p>Vid en signal skickar boten en marknadsorder till Binance. Alla transaktioner loggas med
+                        timestamp, pris, belopp och anledning.</p>
+                </div>
+            </div>
+            <div class="tl-item">
+                <div class="tl-num">06</div>
+                <div class="tl-body">
+                    <h4>Väntar och upprepar dygnet runt</h4>
+                    <p>Boten sover 30 sekunder, vaknar och upprepar processen – dygnet runt, sju dagar i veckan, utan
+                        pauser eller känslobaserade beslut.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <footer>
+        CryptoBot Pro · Data från <a href="https://binance.com" target="_blank">Binance API</a> ·
+        Historisk avkastning garanterar inte framtida resultat ·
+        Investera aldrig mer än du har råd att förlora · Skapad av Gustav Engström
+    </footer>
+
+</body>
+
+</html>
