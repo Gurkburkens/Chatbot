@@ -71,19 +71,28 @@ function beräknaADX(p, n = 14) {
 
 // ── CoinGecko API (via CORS-proxy) ─────────────────────
 
-async function hämtaPrisOchHistorik(coinId) {
-  const [priceRes, histRes] = await Promise.all([
-    fetch(proxyUrl(`${COINGECKO}/simple/price?ids=${coinId}&vs_currencies=usd&include_24hr_change=true`)),
-    fetch(proxyUrl(`${COINGECKO}/coins/${coinId}/market_chart?vs_currency=usd&days=5&interval=hourly`)),
-  ]);
-  if (!priceRes.ok || !histRes.ok) throw new Error('CoinGecko svarade inte');
-  const priceData = await priceRes.json();
-  const histData  = await histRes.json();
-  return {
-    pris:   priceData[coinId].usd,
-    ch24:   priceData[coinId].usd_24h_change,
-    closes: histData.prices.map(p => p[1]),
-  };
+async function hämtaHistorikDaglig(coinId, dagar) {
+  // CoinGecko: interval=daily fungerar bara upp till 90 dagar
+  // För längre perioder tar vi bort interval så får vi automatiska dagspunkter
+  const url = dagar <= 90
+    ? `${COINGECKO}/coins/${coinId}/market_chart?vs_currency=usd&days=${dagar}&interval=daily`
+    : `${COINGECKO}/coins/${coinId}/market_chart?vs_currency=usd&days=${dagar}`;
+
+  const res = await fetch(proxyUrl(url));
+  if (!res.ok) throw new Error(`Kunde inte hämta historik: ${res.status}`);
+  const data = await res.json();
+
+  // Filtrera till en punkt per dag (undviker dubbletter)
+  const dagliga = [];
+  let senasteDatum = '';
+  for (const p of data.prices) {
+    const datum = new Date(p[0]).toISOString().slice(0, 10);
+    if (datum !== senasteDatum) {
+      dagliga.push({ datum, close: p[1] });
+      senasteDatum = datum;
+    }
+  }
+  return dagliga;
 }
 
 async function hämtaHistorikDaglig(coinId, dagar) {
