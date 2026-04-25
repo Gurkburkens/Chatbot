@@ -1,6 +1,7 @@
 // ────────────────────────────────────────
 //   CRYPTOBOT PRO – app.js
-//   API: CoinGecko via CORS-proxy
+//   Live-priser: CoinGecko via proxy
+//   Historik:    Kraken (ingen proxy behövs!)
 // ────────────────────────────────────────
 
 const USD_SEK   = 10.5;
@@ -11,9 +12,10 @@ const TRAILING  = 0.15;
 const MIN_VINST = 0.03;
 const MAX_PTS   = 80;
 
-const COINGECKO = 'https://api.coingecko.com/api/v3';
-const PROXY = 'https://api.allorigins.win/raw?url=';
-const COIN_IDS  = { BTCUSDT: 'bitcoin', ETHUSDT: 'ethereum' };
+const COINGECKO  = 'https://api.coingecko.com/api/v3';
+const PROXY      = 'https://corsproxy.io/?';
+const COIN_IDS   = { BTCUSDT: 'bitcoin',  ETHUSDT: 'ethereum' };
+const KRAKEN_PAR = { BTCUSDT: 'XBTUSD',   ETHUSDT: 'ETHUSD'  };
 
 let liveSymbol  = 'BTCUSDT';
 let liveHistory = [];
@@ -21,9 +23,8 @@ let killSwitch  = false;
 let bigChart    = null;
 let calcChart   = null;
 
-// ── Hjälp: bygg proxad URL ─────────────────────────────
-function proxyUrl(url) {
-  return PROXY + url;
+function px(url) {
+  return PROXY + encodeURIComponent(url);
 }
 
 // ── Indikatorer ────────────────────────────────────────
@@ -69,41 +70,48 @@ function beräknaADX(p, n = 14) {
   return parseFloat((100 * Math.abs(dip - din) / (dip + din || 1)).toFixed(1));
 }
 
-async function hämtaHistorikDaglig(coinId, dagar) {
-  const par    = coinId === 'bitcoin' ? 'XBTUSD' : 'ETHUSD';
-  const sedan  = Math.floor((Date.now() - dagar * 86400000) / 1000);
-  const url    = `https://api.kraken.com/0/public/OHLC?pair=${par}&interval=1440&since=${sedan}`;
-  const res    = await fetch(url);
-  if (!res.ok) throw new Error(`Kraken: ${res.status}`);
-  const json   = await res.json();
-  if (json.error?.length > 0) throw new Error(json.error[0]);
+// ── CoinGecko (live-priser via proxy) ──────────────────
+
+async function hämtaPrisOchHistorik(coinId) {
+  const [priceRes, histRes] = await Promise.all([
+    fetch(px(`${COINGECKO}/simple/price?ids=${coinId}&vs_currencies=usd&include_24hr_change=true`)),
+    fetch(px(`${COINGECKO}/coins/${coinId}/market_chart?vs_currency=usd&days=5&interval=hourly`)),
+  ]);
+  if (!priceRes.ok || !histRes.ok) throw new Error('CoinGecko svarade inte');
+  const priceData = await priceRes.json();
+  const histData  = await histRes.json();
+  return {
+    pris:   priceData[coinId].usd,
+    ch24:   priceData[coinId].usd_24h_change,
+    closes: histData.prices.map(p => p[1]),
+  };
+}
+
+async function uppdateraHeroPriser() {
+  try {
+    const res  = await fetch(px(`${COINGECKO}/simple/price?ids=bitcoin,ethereum&vs_currencies=usd`));
+    const data = await res.json();
+    document.getElementById('hero-btc').textContent = '$' + Math.round(data.bitcoin.usd).toLocaleString('sv-SE');
+    document.getElementById('hero-eth').textContent = '$' + Math.round(data.ethereum.usd).toLocaleString('sv-SE');
+  } catch (e) { console.error('Hero-prisfel:', e); }
+}
+
+// ── Kraken (historik – INGEN proxy behövs) ─────────────
+// Kraken's publika API tillåter CORS direkt från webbläsaren.
+// interval=1440 = dagliga ljus (1440 min = 24h)
+
+async function hämtaHistorikDaglig(symbol, dagar) {
+  const par   = KRAKEN_PAR[symbol];
+  const sedan = Math.floor((Date.now() - (dagar + 10) * 86400000) / 1000);
+  const url   = `https://api.kraken.com/0/public/OHLC?pair=${par}&interval=1440&since=${sedan}`;
+  const res   = await fetch(url);
+  if (!res.ok) throw new Error(`Kraken HTTP-fel: ${res.status}`);
+  const json  = await res.json();
+  if (json.error && json.error.length > 0) throw new Error(`Kraken: ${json.error[0]}`);
   const nyckel = Object.keys(json.result).find(k => k !== 'last');
-  return json.result[nyckel].map(p => ({
-    datum: new Date(p[0] * 1000).toISOString().slice(0, 10),
-    close: parseFloat(p[4]),
-  }));
-}
-
-  // Filtrera till en punkt per dag (undviker dubbletter)
-  const dagliga = [];
-  let senasteDatum = '';
-  for (const p of data.prices) {
-    const datum = new Date(p[0]).toISOString().slice(0, 10);
-    if (datum !== senasteDatum) {
-      dagliga.push({ datum, close: p[1] });
-      senasteDatum = datum;
-    }
-  }
-  return dagliga;
-}
-
-async function hämtaHistorikDaglig(coinId, dagar) {
-  const res = await fetch(proxyUrl(`${COINGECKO}/coins/${coinId}/market_chart?vs_currency=usd&days=${dagar}&interval=daily`));
-  if (!res.ok) throw new Error('Kunde inte hämta historik');
-  const data = await res.json();
-  return data.prices.map(p => ({
-    datum: new Date(p[0]).toISOString().slice(0, 10),
-    close: p[1],
+  return json.result[nyckel].slice(-dagar).map(r => ({
+    datum: new Date(r[0] * 1000).toISOString().slice(0, 10),
+    close: parseFloat(r[4]),
   }));
 }
 
@@ -169,12 +177,10 @@ function uppdateraIndKort(rsiVal, adxVal, avvPct) {
   document.getElementById('rsi-fill').style.width      = rsiVal + '%';
   document.getElementById('rsi-fill').style.background = rsiVal < RSI_KÖP ? '#22c55e' : rsiVal > RSI_SÄLJ ? '#ef4444' : '#6b6b88';
   setBadge('rsi-badge', rsiVal < RSI_KÖP ? 'KÖPZON' : rsiVal > RSI_SÄLJ ? 'SÄLJZON' : 'NEUTRALT', rsiVal < RSI_KÖP ? 'ibuy' : rsiVal > RSI_SÄLJ ? 'isell' : 'ihold');
-
   document.getElementById('adx-big').textContent       = adxVal.toFixed(1);
   document.getElementById('adx-fill').style.width      = Math.min(adxVal, 100) + '%';
   document.getElementById('adx-fill').style.background = adxVal > ADX_GRÄNS ? '#60a5fa' : '#6b6b88';
   setBadge('adx-badge', adxVal > ADX_GRÄNS ? 'STARK TREND' : 'SVAG TREND', adxVal > ADX_GRÄNS ? 'istrong' : 'iweak');
-
   document.getElementById('ma-big').textContent        = (avvPct >= 0 ? '+' : '') + avvPct.toFixed(2) + '%';
   const maPct = Math.min(Math.max((avvPct + 15) / 30 * 100, 0), 100);
   document.getElementById('ma-fill').style.width       = maPct + '%';
@@ -245,15 +251,6 @@ async function uppdateraLive() {
   }
 }
 
-async function uppdateraHeroPriser() {
-  try {
-    const res  = await fetch(proxyUrl(`${COINGECKO}/simple/price?ids=bitcoin,ethereum&vs_currencies=usd`));
-    const data = await res.json();
-    document.getElementById('hero-btc').textContent = '$' + Math.round(data.bitcoin.usd).toLocaleString('sv-SE');
-    document.getElementById('hero-eth').textContent = '$' + Math.round(data.ethereum.usd).toLocaleString('sv-SE');
-  } catch (e) { console.error('Hero-prisfel:', e); }
-}
-
 function byttSymbol(sym, btn) {
   liveSymbol  = sym;
   liveHistory = [];
@@ -270,29 +267,25 @@ function byttSymbol(sym, btn) {
 // ── Kalkylator ─────────────────────────────────────────
 
 async function körKalkylator() {
-  const kapSEK  = parseFloat(document.getElementById('c-kapital').value) || 1000;
-  const manSEK  = parseFloat(document.getElementById('c-manad').value)   || 0;
-  const symbol  = document.getElementById('c-symbol').value;
-  const dagar   = parseInt(document.getElementById('c-period').value);
-  const kapUSD  = kapSEK / USD_SEK;
-  const manUSD  = manSEK / USD_SEK;
-  const coinId  = COIN_IDS[symbol];
-  const veckaSEK = manSEK > 0 ? manSEK / 4.33 : kapSEK * 0.1;
-  const veckaUSD = veckaSEK / USD_SEK;
+  const kapSEK   = parseFloat(document.getElementById('c-kapital').value) || 1000;
+  const manSEK   = parseFloat(document.getElementById('c-manad').value)   || 0;
+  const symbol   = document.getElementById('c-symbol').value;
+  const dagar    = parseInt(document.getElementById('c-period').value);
+  const kapUSD   = kapSEK / USD_SEK;
+  const manUSD   = manSEK / USD_SEK;
+  const veckaUSD = manUSD > 0 ? manUSD / 4.33 : kapUSD * 0.1;
 
   const btn = document.getElementById('calc-btn');
-  btn.textContent = 'Hämtar historisk data...';
+  btn.textContent = 'Hämtar data från Kraken...';
   btn.disabled    = true;
 
   try {
-    const rawData = await hämtaHistorikDaglig(coinId, dagar + 30);
-    const data    = rawData.slice(-dagar);
-    const priser  = data.map(d => d.close);
-
-    if (priser.length < 25) throw new Error('För lite historisk data');
+    const data   = await hämtaHistorikDaglig(symbol, dagar);
+    const priser = data.map(d => d.close);
+    if (priser.length < 25) throw new Error('För lite data – prova kortare period');
 
     let cash = kapUSD, coin = 0, entry = 0, topp = 0;
-    let totInsattUSD = kapUSD, totInsattSEK = kapSEK;
+    let totInsattSEK = kapSEK;
     let manadDag = 0, dcaDag = 0;
     const trades = [], botVals = [], hodlVals = [], insattVals = [];
     const hodlCoin = kapUSD / priser[0];
@@ -304,13 +297,13 @@ async function körKalkylator() {
       const ma20 = hist.length >= 20 ? beräknaMA(hist, 20) : p;
       const avv  = (p - ma20) / ma20;
 
-      // Månadsinsättning
+      // Månadsinsättning var 30:e dag
       manadDag++;
       if (manadDag >= 30 && manUSD > 0) {
-        cash += manUSD; totInsattUSD += manUSD; totInsattSEK += manSEK; manadDag = 0;
+        cash += manUSD; totInsattSEK += manSEK; manadDag = 0;
       }
 
-      // Trailing stop
+      // Trailing stop (15%)
       if (coin > 0 && topp > 0) {
         if (p > topp) topp = p;
         if (p <= topp * (1 - TRAILING)) {
@@ -321,7 +314,7 @@ async function körKalkylator() {
         }
       }
 
-      // RSI sälj
+      // RSI sälj (>63 + minst 3% vinst)
       if (coin > 0 && rsi > RSI_SÄLJ && entry > 0) {
         const vp = (p - entry) / entry * 100;
         if (vp >= MIN_VINST * 100) {
@@ -331,7 +324,7 @@ async function körKalkylator() {
         }
       }
 
-      // DCA
+      // DCA veckovis
       dcaDag++;
       if (dcaDag >= 7 && hist.length >= 20 && rsi <= RSI_SÄLJ && cash >= veckaUSD) {
         dcaDag = 0;
@@ -340,10 +333,10 @@ async function körKalkylator() {
         if (coin === 0) { entry = p; topp = p; }
         else { entry = (entry * coin + p * m) / (coin + m); if (p > topp) topp = p; }
         coin += m; cash -= bel;
-        trades.push({ datum: data[i].datum, typ: 'DCA', pris: p, vp: null, orsak: `DCA veckoköp (RSI ${rsi.toFixed(0)})` });
+        trades.push({ datum: data[i].datum, typ: 'DCA', pris: p, vp: null, orsak: `DCA (RSI ${rsi.toFixed(0)})` });
       }
 
-      // Mean reversion
+      // Mean reversion – extra köp vid dipp >5%
       if (hist.length >= 20 && avv <= -0.05 && rsi < RSI_KÖP && cash >= veckaUSD * 2) {
         const bel = Math.min(veckaUSD * 2, cash * 0.4);
         const m   = bel / p;
@@ -353,18 +346,19 @@ async function körKalkylator() {
         trades.push({ datum: data[i].datum, typ: 'KÖP', pris: p, vp: null, orsak: `Dipp ${(avv * 100).toFixed(1)}% + RSI ${rsi.toFixed(0)}` });
       }
 
+      // Portföljvärde = cash + BTC-värde i SEK
       botVals.push(Math.round((cash + coin * p) * USD_SEK));
       hodlVals.push(Math.round(hodlCoin * p * USD_SEK));
       insattVals.push(Math.round(totInsattSEK));
     }
 
-    const labels  = data.map(d => d.datum);
-    const slutBot = botVals[botVals.length - 1];
-    const slutHodl= hodlVals[hodlVals.length - 1];
-    const botPnl  = slutBot - totInsattSEK;
-    const botPct  = botPnl / totInsattSEK * 100;
-    const hodlPct = (slutHodl - kapSEK) / kapSEK * 100;
-    const bankPct = dagar / 365 * 2.5;
+    const labels   = data.map(d => d.datum);
+    const slutBot  = botVals[botVals.length - 1];
+    const slutHodl = hodlVals[hodlVals.length - 1];
+    const botPnl   = slutBot - totInsattSEK;
+    const botPct   = botPnl / totInsattSEK * 100;
+    const hodlPct  = (slutHodl - kapSEK) / kapSEK * 100;
+    const bankPct  = dagar / 365 * 2.5;
 
     let peak = botVals[0], maxDD = 0;
     for (const v of botVals) {
@@ -409,17 +403,18 @@ async function körKalkylator() {
     calcChart = new Chart(document.getElementById('calcChart'), {
       type: 'line',
       data: { labels, datasets: [
-        { label:'Bot-strategi', data:botVals,    borderColor:'#f59e0b', borderWidth:2,   pointRadius:0, tension:0.3, fill:true,  backgroundColor:'rgba(245,158,11,0.07)' },
-        { label:'HODL',         data:hodlVals,   borderColor:'#60a5fa', borderWidth:1.5, pointRadius:0, tension:0.3, fill:false, borderDash:[5,4] },
-        { label:'Insatt',       data:insattVals, borderColor:'#3a3a50', borderWidth:1,   pointRadius:0, tension:0,   fill:false, borderDash:[2,3] },
+        { label:'Bot', data:botVals,    borderColor:'#f59e0b', borderWidth:2,   pointRadius:0, tension:0.3, fill:true,  backgroundColor:'rgba(245,158,11,0.07)' },
+        { label:'HODL', data:hodlVals,  borderColor:'#60a5fa', borderWidth:1.5, pointRadius:0, tension:0.3, fill:false, borderDash:[5,4] },
+        { label:'Insatt', data:insattVals, borderColor:'#3a3a50', borderWidth:1, pointRadius:0, tension:0, fill:false, borderDash:[2,3] },
       ]},
-      options: { responsive:true, maintainAspectRatio:false,
-        plugins:{ legend:{display:false}, tooltip:{ backgroundColor:'#13131a', borderColor:'#22222e', borderWidth:1, titleColor:'#6b6b88', bodyColor:'#f0f0f8', callbacks:{ label: ctx => `${ctx.dataset.label}: ${Math.round(ctx.parsed.y).toLocaleString('sv-SE')} kr` }}},
-        scales:{ x:{ticks:{color:'#3a3a50',font:{size:10},maxTicksLimit:8},grid:{color:'#1a1a24'}}, y:{ticks:{color:'#3a3a50',font:{size:10},callback:v=>Math.round(v).toLocaleString('sv-SE')+' kr'},grid:{color:'#1a1a24'}} }
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend:{display:false}, tooltip:{ backgroundColor:'#13131a', borderColor:'#22222e', borderWidth:1, titleColor:'#6b6b88', bodyColor:'#f0f0f8', callbacks:{ label: ctx => `${ctx.dataset.label}: ${Math.round(ctx.parsed.y).toLocaleString('sv-SE')} kr` }}},
+        scales: { x:{ticks:{color:'#3a3a50',font:{size:10},maxTicksLimit:8},grid:{color:'#1a1a24'}}, y:{ticks:{color:'#3a3a50',font:{size:10},callback:v=>Math.round(v).toLocaleString('sv-SE')+' kr'},grid:{color:'#1a1a24'}} }
       },
     });
 
-    document.getElementById('trades-count-label').textContent = `${trades.length} affärer totalt · ${trades.filter(t=>t.typ==='SÄLJ').length} sälj · ${trades.filter(t=>t.typ!=='SÄLJ').length} köp`;
+    document.getElementById('trades-count-label').textContent = `${trades.length} affärer · ${trades.filter(t=>t.typ==='SÄLJ').length} sälj · ${trades.filter(t=>t.typ!=='SÄLJ').length} köp`;
     document.getElementById('trades-mini').innerHTML =
       '<div class="trade-row-mini" style="color:var(--muted);font-size:10px;letter-spacing:0.05em;border-bottom:1px solid var(--border);padding-bottom:6px;"><span>DATUM</span><span>TYP</span><span>PRIS</span><span>VINST</span><span>ORSAK</span></div>' +
       trades.slice(-50).reverse().map(t => `
@@ -433,14 +428,14 @@ async function körKalkylator() {
           <span style="color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${t.orsak}</span>
         </div>`).join('');
 
-    const res = document.getElementById('calc-results');
-    res.style.display = 'block';
-    res.classList.add('fade-in');
-    res.scrollIntoView({ behavior:'smooth', block:'nearest' });
+    const resEl = document.getElementById('calc-results');
+    resEl.style.display = 'block';
+    resEl.classList.add('fade-in');
+    resEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
   } catch (e) {
-    console.error('Kalkylatorn kraschade:', e);
-    document.getElementById('calc-btn').textContent = '⚠️ Fel – försök igen om en stund';
+    console.error('Kalkylatorfel:', e);
+    document.getElementById('calc-btn').textContent = '⚠️ ' + e.message;
   } finally {
     btn.textContent = 'Beräkna vad boten hade genererat';
     btn.disabled    = false;
@@ -452,8 +447,8 @@ async function körKalkylator() {
 document.addEventListener('DOMContentLoaded', () => {
   initBigChart();
   setTimeout(uppdateraHeroPriser, 500);
-  setTimeout(uppdateraLive, 1500);
-  setTimeout(körKalkylator, 3000);
-  setInterval(uppdateraLive, 60_000);
-  setInterval(uppdateraHeroPriser, 90_000);
+  setTimeout(uppdateraLive,       1500);
+  setTimeout(körKalkylator,       2500);
+  setInterval(uppdateraLive,      60_000);
+  setInterval(uppdateraHeroPriser,90_000);
 });
