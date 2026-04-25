@@ -6,9 +6,9 @@
 
 const USD_SEK   = 10.5;
 const RSI_KÖP   = 40;   // Lite generösare köpzon
-const RSI_SÄLJ  = 70;   // Säljer bara vid tydlig överköpthet
+const RSI_SÄLJ  = 80;   // Säljer nästan aldrig
 const ADX_GRÄNS = 20;
-const TRAILING  = 0.12; // 12% trailing stop
+const TRAILING  = 0.20; // 20% trailing - låter vinster löpa
 const MIN_VINST = 0.02; // 2% minst för att sälja
 const MAX_PTS   = 80;
 
