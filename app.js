@@ -1,15 +1,15 @@
 // ────────────────────────────────────────
 //   CRYPTOBOT PRO – app.js
-//   Live-priser: CoinGecko via proxy
-//   Historik:    Kraken (ingen proxy behövs!)
+//   Live:    CoinGecko via CORS-proxy
+//   Historik: Kraken (ingen proxy)
 // ────────────────────────────────────────
 
 const USD_SEK   = 10.5;
-const RSI_KÖP   = 38;
-const RSI_SÄLJ  = 63;
-const ADX_GRÄNS = 25;
-const TRAILING  = 0.15;
-const MIN_VINST = 0.03;
+const RSI_KÖP   = 40;   // Lite generösare köpzon
+const RSI_SÄLJ  = 70;   // Säljer bara vid tydlig överköpthet
+const ADX_GRÄNS = 20;
+const TRAILING  = 0.12; // 12% trailing stop
+const MIN_VINST = 0.02; // 2% minst för att sälja
 const MAX_PTS   = 80;
 
 const COINGECKO  = 'https://api.coingecko.com/api/v3';
@@ -70,7 +70,7 @@ function beräknaADX(p, n = 14) {
   return parseFloat((100 * Math.abs(dip - din) / (dip + din || 1)).toFixed(1));
 }
 
-// ── CoinGecko (live-priser via proxy) ──────────────────
+// ── API ────────────────────────────────────────────────
 
 async function hämtaPrisOchHistorik(coinId) {
   const [priceRes, histRes] = await Promise.all([
@@ -96,10 +96,6 @@ async function uppdateraHeroPriser() {
   } catch (e) { console.error('Hero-prisfel:', e); }
 }
 
-// ── Kraken (historik – INGEN proxy behövs) ─────────────
-// Kraken's publika API tillåter CORS direkt från webbläsaren.
-// interval=1440 = dagliga ljus (1440 min = 24h)
-
 async function hämtaHistorikDaglig(symbol, dagar) {
   const par   = KRAKEN_PAR[symbol];
   const sedan = Math.floor((Date.now() - (dagar + 10) * 86400000) / 1000);
@@ -112,6 +108,8 @@ async function hämtaHistorikDaglig(symbol, dagar) {
   return json.result[nyckel].slice(-dagar).map(r => ({
     datum: new Date(r[0] * 1000).toISOString().slice(0, 10),
     close: parseFloat(r[4]),
+    high:  parseFloat(r[2]),
+    low:   parseFloat(r[3]),
   }));
 }
 
@@ -131,10 +129,7 @@ function initBigChart() {
     },
     options: {
       responsive: true, maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false },
-        tooltip: { backgroundColor:'#13131a', borderColor:'#22222e', borderWidth:1, titleColor:'#6b6b88', bodyColor:'#f0f0f8', callbacks: { label: ctx => `${ctx.dataset.label}: $${Math.round(ctx.parsed.y).toLocaleString('sv-SE')}` } },
-      },
+      plugins: { legend:{display:false}, tooltip:{ backgroundColor:'#13131a', borderColor:'#22222e', borderWidth:1, titleColor:'#6b6b88', bodyColor:'#f0f0f8', callbacks:{ label: ctx => `${ctx.dataset.label}: $${Math.round(ctx.parsed.y).toLocaleString('sv-SE')}` }}},
       scales: {
         x: { ticks:{ color:'#3a3a50', font:{size:10}, maxTicksLimit:8 }, grid:{ color:'#1a1a24' } },
         y: { ticks:{ color:'#3a3a50', font:{size:10}, callback: v => '$' + Math.round(v).toLocaleString('sv-SE') }, grid:{ color:'#1a1a24' } },
@@ -264,7 +259,14 @@ function byttSymbol(sym, btn) {
   uppdateraLive();
 }
 
-// ── Kalkylator ─────────────────────────────────────────
+// ── KALKYLATOR ─────────────────────────────────────────
+//
+//  Strategi:
+//  1. Dag 0: Investera 50% av startkapitalet direkt
+//  2. DCA: Investera veckosumman varje 7:e dag
+//  3. Dippköp: Extra köp vid >5% dipp under MA20
+//  4. Sälj: Trailing stop 12% ELLER RSI>70 med >2% vinst
+//  5. Håll annars – boten är long-biased (tror på uppgång)
 
 async function körKalkylator() {
   const kapSEK   = parseFloat(document.getElementById('c-kapital').value) || 1000;
@@ -273,7 +275,9 @@ async function körKalkylator() {
   const dagar    = parseInt(document.getElementById('c-period').value);
   const kapUSD   = kapSEK / USD_SEK;
   const manUSD   = manSEK / USD_SEK;
-  const veckaUSD = manUSD > 0 ? manUSD / 4.33 : kapUSD * 0.1;
+
+  // Veckosumma = månadsinsättning / 4.33 veckor per månad
+  const veckaUSD = manUSD > 0 ? manUSD / 4.33 : kapUSD * 0.15;
 
   const btn = document.getElementById('calc-btn');
   btn.textContent = 'Hämtar data från Kraken...';
@@ -284,26 +288,43 @@ async function körKalkylator() {
     const priser = data.map(d => d.close);
     if (priser.length < 25) throw new Error('För lite data – prova kortare period');
 
-    let cash = kapUSD, coin = 0, entry = 0, topp = 0;
+    // ── Startstate ─────────────────────────────────────
+    let cash = kapUSD * 0.5;  // Håll 50% cash som reserv från start
+    let coin = 0;
+    let entry = 0;
+    let topp  = 0;
     let totInsattSEK = kapSEK;
     let manadDag = 0, dcaDag = 0;
     const trades = [], botVals = [], hodlVals = [], insattVals = [];
+
+    // HODL: köp för hela startkapitalet dag 1
     const hodlCoin = kapUSD / priser[0];
 
+    // Investera 50% av startkapitalet dag 1 direkt
+    const startMängd = (kapUSD * 0.5) / priser[0];
+    coin  = startMängd;
+    entry = priser[0];
+    topp  = priser[0];
+    trades.push({ datum: data[0].datum, typ: 'KÖP', pris: priser[0], vp: null, orsak: 'Startinvestering (50% av kapital)' });
+
+    // ── Daglig loop ───────────────────────────────────
     for (let i = 0; i < priser.length; i++) {
       const p    = priser[i];
       const hist = priser.slice(0, i + 1);
       const rsi  = hist.length >= 15 ? beräknaRSI(hist) : 50;
       const ma20 = hist.length >= 20 ? beräknaMA(hist, 20) : p;
+      const ma50 = hist.length >= 50 ? beräknaMA(hist, 50) : p;
       const avv  = (p - ma20) / ma20;
 
-      // Månadsinsättning var 30:e dag
+      // ── 1. Månadsinsättning ──────────────────────────
       manadDag++;
       if (manadDag >= 30 && manUSD > 0) {
-        cash += manUSD; totInsattSEK += manSEK; manadDag = 0;
+        cash += manUSD;
+        totInsattSEK += manSEK;
+        manadDag = 0;
       }
 
-      // Trailing stop (15%)
+      // ── 2. Trailing stop ─────────────────────────────
       if (coin > 0 && topp > 0) {
         if (p > topp) topp = p;
         if (p <= topp * (1 - TRAILING)) {
@@ -314,7 +335,7 @@ async function körKalkylator() {
         }
       }
 
-      // RSI sälj (>63 + minst 3% vinst)
+      // ── 3. RSI-sälj (bara vid tydlig överköpthet) ───
       if (coin > 0 && rsi > RSI_SÄLJ && entry > 0) {
         const vp = (p - entry) / entry * 100;
         if (vp >= MIN_VINST * 100) {
@@ -324,34 +345,53 @@ async function körKalkylator() {
         }
       }
 
-      // DCA veckovis
+      // ── 4. DCA veckovis (investera oavsett pris) ────
       dcaDag++;
-      if (dcaDag >= 7 && hist.length >= 20 && rsi <= RSI_SÄLJ && cash >= veckaUSD) {
+      if (dcaDag >= 7 && cash >= veckaUSD * 0.5) {
         dcaDag = 0;
-        const bel = Math.min(veckaUSD, cash * 0.5);
+        // DCA köper alltid – oavsett RSI (det är poängen med DCA)
+        const bel = Math.min(veckaUSD, cash * 0.8);
         const m   = bel / p;
         if (coin === 0) { entry = p; topp = p; }
         else { entry = (entry * coin + p * m) / (coin + m); if (p > topp) topp = p; }
         coin += m; cash -= bel;
-        trades.push({ datum: data[i].datum, typ: 'DCA', pris: p, vp: null, orsak: `DCA (RSI ${rsi.toFixed(0)})` });
+        trades.push({ datum: data[i].datum, typ: 'DCA', pris: p, vp: null, orsak: `DCA (RSI ${rsi.toFixed(0)}, MA ${avv >= 0 ? '+' : ''}${(avv*100).toFixed(1)}%)` });
       }
 
-      // Mean reversion – extra köp vid dipp >5%
-      if (hist.length >= 20 && avv <= -0.05 && rsi < RSI_KÖP && cash >= veckaUSD * 2) {
-        const bel = Math.min(veckaUSD * 2, cash * 0.4);
-        const m   = bel / p;
+      // ── 5. Dippköp – extra vid stor dipp ────────────
+      if (hist.length >= 20 && avv <= -0.05 && rsi < RSI_KÖP && cash >= veckaUSD) {
+        // Köp mer ju större dipppen är
+        const dippFaktor = Math.min(Math.abs(avv) / 0.05, 3); // Max 3x
+        const bel        = Math.min(veckaUSD * dippFaktor, cash * 0.7);
+        const m          = bel / p;
         if (coin === 0) { entry = p; topp = p; }
         else { entry = (entry * coin + p * m) / (coin + m); if (p > topp) topp = p; }
         coin += m; cash -= bel;
-        trades.push({ datum: data[i].datum, typ: 'KÖP', pris: p, vp: null, orsak: `Dipp ${(avv * 100).toFixed(1)}% + RSI ${rsi.toFixed(0)}` });
+        trades.push({ datum: data[i].datum, typ: 'KÖP', pris: p, vp: null, orsak: `Dipp ${(avv*100).toFixed(1)}% × ${dippFaktor.toFixed(1)} (RSI ${rsi.toFixed(0)})` });
       }
 
-      // Portföljvärde = cash + BTC-värde i SEK
+      // ── 6. Trend-köp – köp vid uppbrott ─────────────
+      // Om MA20 precis bröt MA50 uppåt och vi har cash – köp lite extra
+      if (hist.length >= 51 && cash >= veckaUSD * 0.5) {
+        const prevMA20 = beräknaMA(priser.slice(0, i), 20);
+        const prevMA50 = beräknaMA(priser.slice(0, i), 50);
+        if (prevMA20 <= prevMA50 && ma20 > ma50) {
+          const bel = Math.min(veckaUSD, cash * 0.5);
+          const m   = bel / p;
+          if (coin === 0) { entry = p; topp = p; }
+          else { entry = (entry * coin + p * m) / (coin + m); if (p > topp) topp = p; }
+          coin += m; cash -= bel;
+          trades.push({ datum: data[i].datum, typ: 'KÖP', pris: p, vp: null, orsak: 'MA20 bröt MA50 uppåt (trendsignal)' });
+        }
+      }
+
+      // Portföljvärde = cash + BTC-innehav × pris
       botVals.push(Math.round((cash + coin * p) * USD_SEK));
       hodlVals.push(Math.round(hodlCoin * p * USD_SEK));
       insattVals.push(Math.round(totInsattSEK));
     }
 
+    // ── Beräkna resultat ──────────────────────────────
     const labels   = data.map(d => d.datum);
     const slutBot  = botVals[botVals.length - 1];
     const slutHodl = hodlVals[hodlVals.length - 1];
@@ -367,6 +407,7 @@ async function körKalkylator() {
       if (dd > maxDD) maxDD = dd;
     }
 
+    // ── Visa resultat ─────────────────────────────────
     document.getElementById('result-big').innerHTML = `
       <div class="result-card highlight">
         <div class="result-label">SLUTVÄRDE (BOT)</div>
@@ -399,6 +440,7 @@ async function körKalkylator() {
         <div class="result-sub">${trades.filter(t => t.typ === 'SÄLJ').length} sälj · ${trades.filter(t => t.typ !== 'SÄLJ').length} köp</div>
       </div>`;
 
+    // ── Graf ──────────────────────────────────────────
     if (calcChart) calcChart.destroy();
     calcChart = new Chart(document.getElementById('calcChart'), {
       type: 'line',
@@ -414,6 +456,7 @@ async function körKalkylator() {
       },
     });
 
+    // ── Affärslista ───────────────────────────────────
     document.getElementById('trades-count-label').textContent = `${trades.length} affärer · ${trades.filter(t=>t.typ==='SÄLJ').length} sälj · ${trades.filter(t=>t.typ!=='SÄLJ').length} köp`;
     document.getElementById('trades-mini').innerHTML =
       '<div class="trade-row-mini" style="color:var(--muted);font-size:10px;letter-spacing:0.05em;border-bottom:1px solid var(--border);padding-bottom:6px;"><span>DATUM</span><span>TYP</span><span>PRIS</span><span>VINST</span><span>ORSAK</span></div>' +
