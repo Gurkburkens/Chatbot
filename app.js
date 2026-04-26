@@ -1,12 +1,8 @@
 // ────────────────────────────────────────
 //   CRYPTOBOT PRO – app.js
 //   Live:     CoinGecko via CORS-proxy
-//   Historik: Kraken (smart intervallval)
-//     1 mån  → 1h  data (720 punkter)
-//     3 mån  → 4h  data (540 punkter)
-//     6 mån  → 4h  data (720 punkter = 120d)
-//     1 år   → 1d  data (365 punkter)
-//     2 år   → 1d  data (730 punkter)
+//   Historik: Inbyggd i data.js (721 dagar)
+//             + live-uppdatering för färska data
 // ────────────────────────────────────────
 
 const USD_SEK    = 10.5;
@@ -16,12 +12,12 @@ const ADX_GRÄNS  = 25;
 const TRAILING   = 0.15;
 const MAX_PTS    = 80;
 
-// Micro-trade parametrar (backtestade optimala)
-const MICRO_DIPP      = 0.005;  // 0.5% dipp under MA
-const MICRO_VINST     = 0.02;   // +2% sälj
-const MICRO_STOPLOSS  = 0.02;   // -2% stop loss
-const MICRO_POSSTRL   = 0.5;    // 50% av trading-cash
-const BAS_ANDEL       = 0.5;    // 50% alltid i BTC
+// Optimerade micro-trade parametrar
+const MICRO_DIPP      = 0.005;  // 0.5% dipp under MA20
+const MICRO_VINST     = 0.02;   // +2% vinst → sälj
+const MICRO_STOPLOSS  = 0.02;   // -2% förlust → stop loss
+const MICRO_POSSTRL   = 0.5;    // 50% av trading-cash per affär
+const BAS_ANDEL       = 0.5;    // 50% alltid i BTC (fångar uppgångar)
 
 const COINGECKO  = 'https://api.coingecko.com/api/v3';
 const PROXY      = 'https://corsproxy.io/?';
@@ -75,7 +71,53 @@ function beräknaADX(p, n=14) {
   return parseFloat((100*Math.abs(dip-din)/(dip+din||1)).toFixed(1));
 }
 
-// ── API ────────────────────────────────────────────────
+// ── Hämta historisk data (inbyggd + live-uppdatering) ──
+//
+//  Strategi:
+//  1. Använd inbyggd data från data.js (721 dagar)
+//  2. Hämta senaste dagarna från Kraken för att
+//     hålla datan färsk (fungerar alltid)
+//  3. Kombinera till en komplett dataset
+
+async function hämtaKombineradData(symbol, dagar) {
+  const historisk = symbol === 'BTCUSDT'
+    ? HISTORISK_DATA.btc
+    : HISTORISK_DATA.eth;
+
+  // Hämta de senaste 30 dagarna live från Kraken
+  const par   = KRAKEN_PAR[symbol];
+  const sedan = Math.floor((Date.now() - 35*86400000)/1000);
+  let liveData = [];
+
+  try {
+    const res  = await fetch(`https://api.kraken.com/0/public/OHLC?pair=${par}&interval=1440&since=${sedan}`);
+    const json = await res.json();
+    if (!json.error?.length) {
+      const k = Object.keys(json.result).find(k=>k!=='last');
+      liveData = json.result[k].map(r=>({
+        datum: new Date(r[0]*1000).toISOString().slice(0,10),
+        close: parseFloat(r[4]),
+      }));
+    }
+  } catch(e) {
+    console.warn('Live-data misslyckades, använder bara historisk data');
+  }
+
+  // Kombinera: historisk data + live-data (ta bort överlapp)
+  const historiskDatum = new Set(historisk.map(d=>d[0]));
+  const nyaLivePunkter = liveData.filter(d => !historiskDatum.has(d.datum));
+
+  const allData = [
+    ...historisk.map(d=>({ datum:d[0], close:d[1] })),
+    ...nyaLivePunkter,
+  ];
+
+  // Sortera och ta de senaste N dagarna
+  allData.sort((a,b) => a.datum.localeCompare(b.datum));
+  return allData.slice(-dagar);
+}
+
+// ── API (live-priser) ──────────────────────────────────
 
 async function hämtaPrisOchHistorik(coinId) {
   const [pr, hr] = await Promise.all([
@@ -94,46 +136,6 @@ async function uppdateraHeroPriser() {
     document.getElementById('hero-btc').textContent='$'+Math.round(d.bitcoin.usd).toLocaleString('sv-SE');
     document.getElementById('hero-eth').textContent='$'+Math.round(d.ethereum.usd).toLocaleString('sv-SE');
   } catch(e){console.error(e);}
-}
-
-// Smart datahämtning – väljer rätt Kraken-intervall per period
-async function hämtaKrakenData(symbol, dagar) {
-  const par = KRAKEN_PAR[symbol];
-
-  // Välj intervall baserat på period
-  // Kraken returnerar alltid max ~720 punkter per request
-  let intervall, punktPerDag, label;
-  if (dagar <= 30) {
-    intervall = 60;    // 1h  → 720 timmar = 30 dagar
-    punktPerDag = 24;
-    label = '1h';
-  } else if (dagar <= 120) {
-    intervall = 240;   // 4h  → 720 punkter = 120 dagar
-    punktPerDag = 6;
-    label = '4h';
-  } else {
-    intervall = 1440;  // 1d  → 720 dagliga = 720 dagar
-    punktPerDag = 1;
-    label = '1d';
-  }
-
-  const sedan = Math.floor((Date.now() - (dagar+5)*86400000)/1000);
-  const url   = `https://api.kraken.com/0/public/OHLC?pair=${par}&interval=${intervall}&since=${sedan}`;
-  const res   = await fetch(url);
-  if (!res.ok) throw new Error(`Kraken HTTP ${res.status}`);
-  const json  = await res.json();
-  if (json.error?.length>0) throw new Error(json.error[0]);
-  const nyckel = Object.keys(json.result).find(k=>k!=='last');
-  const rader  = json.result[nyckel].slice(-(dagar*punktPerDag));
-
-  return {
-    punkter: rader.map(r=>({
-      datum:    new Date(r[0]*1000).toISOString().slice(0,10),
-      close:    parseFloat(r[4]),
-    })),
-    punktPerDag,
-    intervallLabel: label,
-  };
 }
 
 // ── Live Chart ─────────────────────────────────────────
@@ -159,7 +161,7 @@ function initBigChart() {
 }
 
 function pushLive(pris,ma20Val,signal,tid) {
-  if (bigChart.data.labels.length>=MAX_PTS){bigChart.data.labels.shift();bigChart.data.datasets.forEach(d=>d.data.shift());}
+  if(bigChart.data.labels.length>=MAX_PTS){bigChart.data.labels.shift();bigChart.data.datasets.forEach(d=>d.data.shift());}
   bigChart.data.labels.push(tid);
   bigChart.data.datasets[0].data.push(pris);
   bigChart.data.datasets[1].data.push(ma20Val);
@@ -170,8 +172,8 @@ function pushLive(pris,ma20Val,signal,tid) {
 
 // ── UI helpers ─────────────────────────────────────────
 
-function setMetric(id,value,cls){const el=document.getElementById(id);if(!el)return;el.textContent=value;el.className='metric-tile-value '+cls;}
-function setBadge(id,text,cls) {const el=document.getElementById(id);if(!el)return;el.textContent=text;el.className='ind-badge '+cls;}
+function setMetric(id,v,cls){const el=document.getElementById(id);if(!el)return;el.textContent=v;el.className='metric-tile-value '+cls;}
+function setBadge(id,t,cls) {const el=document.getElementById(id);if(!el)return;el.textContent=t;el.className='ind-badge '+cls;}
 
 function uppdateraIndKort(rsiVal,adxVal,avvPct){
   document.getElementById('rsi-big').textContent=rsiVal.toFixed(1);
@@ -199,18 +201,17 @@ async function uppdateraLive() {
     const ma20Val=beräknaMA(liveHistory,20),avv=(pris-ma20Val)/ma20Val*100;
     const ema20=beräknaEMA(liveHistory,20),ema50=beräknaEMA(liveHistory,50);
     const emaCross=liveHistory.length>52&&beräknaEMA(liveHistory.slice(0,-1),20)<=beräknaEMA(liveHistory.slice(0,-1),50)&&ema20>ema50;
-    if (liveHistory.length>=168){const vf=(pris-liveHistory[liveHistory.length-169])/liveHistory[liveHistory.length-169];if(vf<=-0.25)killSwitch=true;if(killSwitch&&vf>-0.10&&rsiVal>35&&rsiVal<60)killSwitch=false;}
+    if(liveHistory.length>=168){const vf=(pris-liveHistory[liveHistory.length-169])/liveHistory[liveHistory.length-169];if(vf<=-0.25)killSwitch=true;if(killSwitch&&vf>-0.10&&rsiVal>35&&rsiVal<60)killSwitch=false;}
     let signal='AVVAKTAR';
-    if (killSwitch) signal='KILL SWITCH';
-    else if (rsiVal>RSI_SÄLJ) signal='SÄLJSIGNAL';
-    else if (avv<=-MICRO_DIPP*100&&rsiVal<RSI_KÖP) signal='KÖPSIGNAL (dipp)';
-    else if (emaCross&&adxVal>ADX_GRÄNS&&rsiVal<RSI_SÄLJ) signal='KÖPSIGNAL (EMA)';
+    if(killSwitch)signal='KILL SWITCH';
+    else if(rsiVal>RSI_SÄLJ)signal='SÄLJSIGNAL';
+    else if(avv<=-MICRO_DIPP*100&&rsiVal<RSI_KÖP)signal='KÖPSIGNAL (dipp)';
+    else if(emaCross&&adxVal>ADX_GRÄNS&&rsiVal<RSI_SÄLJ)signal='KÖPSIGNAL (EMA)';
     const tid=new Date().toLocaleTimeString('sv-SE');
     pushLive(pris,ma20Val,signal.includes('KÖP')?'KÖP':signal.includes('SÄLJ')?'SÄLJ':null,tid);
     document.getElementById('live-price').textContent='$'+pris.toLocaleString('sv-SE',{maximumFractionDigits:0});
     document.getElementById('live-updated').textContent='Uppdaterad '+tid;
-    const chEl=document.getElementById('live-change');
-    chEl.textContent=(ch24>=0?'+':'')+ch24.toFixed(2)+'% (24h)';chEl.className='price-change '+(ch24>=0?'pos':'neg');
+    const chEl=document.getElementById('live-change');chEl.textContent=(ch24>=0?'+':'')+ch24.toFixed(2)+'% (24h)';chEl.className='price-change '+(ch24>=0?'pos':'neg');
     const sigColors={'KÖPSIGNAL (dipp)':'#22c55e','KÖPSIGNAL (EMA)':'#22c55e','SÄLJSIGNAL':'#ef4444','KILL SWITCH':'#ef4444','AVVAKTAR':'#6b6b88'};
     const sigEl=document.getElementById('live-signal-box');sigEl.textContent=signal;sigEl.style.color=sigColors[signal]||'#6b6b88';
     document.getElementById('hero-rsi').textContent=rsiVal.toFixed(1);
@@ -235,11 +236,8 @@ function byttSymbol(sym,btn){
 
 // ── SIMULERING ─────────────────────────────────────────
 //
-//  50% basinnehav + micro trading
-//  Smart intervallval per period:
-//  ≤30d  → 1h data  (bäst för micro trades, 720 punkter)
-//  ≤120d → 4h data  (720 punkter = 120 dagar)
-//  >120d → 1d data  (upp till 730 dagar)
+//  Använder inbyggd historisk data (data.js) + live-uppdatering
+//  50% basinnehav + micro trades (RSI<40, 0.5% dipp, +2% sälj)
 
 async function körKalkylator() {
   const kapSEK = parseFloat(document.getElementById('c-kapital').value)||1000;
@@ -249,40 +247,38 @@ async function körKalkylator() {
   const kapUSD = kapSEK/USD_SEK, manUSD=manSEK/USD_SEK;
 
   const btn=document.getElementById('calc-btn');
-  btn.textContent='Hämtar data från Kraken...';btn.disabled=true;
+  btn.textContent='Beräknar med historisk data...';btn.disabled=true;
 
   try {
-    const {punkter,punktPerDag,intervallLabel} = await hämtaKrakenData(symbol,dagar);
-    const priser = punkter.map(d=>d.close);
-    if (priser.length<20) throw new Error('För lite data');
+    // Hämta kombinerad data (inbyggd + live)
+    const data   = await hämtaKombineradData(symbol, dagar);
+    const priser = data.map(d=>d.close);
+    if (priser.length<10) throw new Error('Inte tillräckligt med historisk data för denna period');
 
-    // Hur ofta månadsinsättning (i antal punkter)
-    const månadsIntervall = Math.round(30*punktPerDag);
+    const månInt = 30; // dagar mellan månadsinsättningar
 
     // ── Portföljstate ─────────────────────────────────
-    const basUSD   = kapUSD*BAS_ANDEL;
-    let basCoin    = basUSD/priser[0];
-    let tradeCash  = kapUSD*(1-BAS_ANDEL);
-    let tradeCoin  = 0, tradeEntry=0;
-    let totInsatt  = kapSEK;
-    let räknare    = 0;
-
+    const basUSD  = kapUSD*BAS_ANDEL;
+    let basCoin   = basUSD/priser[0];       // 50% köps dag 1
+    let tradeCash = kapUSD*(1-BAS_ANDEL);   // 50% trading-cash
+    let tradeCoin = 0, tradeEntry = 0;
+    let totInsatt = kapSEK, dagRäknare = 0;
     const hodlCoin = kapUSD/priser[0];
-    const trades=[], botVals=[], hodlVals=[], insattVals=[];
+    const trades=[],botVals=[],hodlVals=[],insattVals=[];
 
-    trades.push({datum:punkter[0].datum,typ:'KÖP',pris:priser[0],vp:null,orsak:`Basinnehav 50% (${(basUSD*USD_SEK).toFixed(0)} kr)`});
+    trades.push({datum:data[0].datum,typ:'KÖP',pris:priser[0],vp:null,orsak:`Basinnehav 50% – ${(basUSD*USD_SEK).toFixed(0)} kr investerat dag 1`});
 
     for (let i=0;i<priser.length;i++){
       const p=priser[i],hist=priser.slice(0,i+1);
-      const rsi=beräknaRSI(hist,14),ma20=beräknaMA(hist,20),avv=(p-ma20)/ma20;
+      const rsi=beräknaRSI(hist),ma20=beräknaMA(hist,20),avv=(p-ma20)/ma20;
 
-      // Månadsinsättning
-      räknare++;
-      if (räknare>=månadsIntervall&&manUSD>0){
+      // Månadsinsättning var 30:e dag
+      dagRäknare++;
+      if (dagRäknare>=månInt&&manUSD>0){
         basCoin+=(manUSD*BAS_ANDEL)/p;
         tradeCash+=manUSD*(1-BAS_ANDEL);
-        totInsatt+=manSEK;räknare=0;
-        trades.push({datum:punkter[i].datum,typ:'DCA',pris:p,vp:null,orsak:`Månadsinsättning ${manSEK} kr`});
+        totInsatt+=manSEK; dagRäknare=0;
+        trades.push({datum:data[i].datum,typ:'DCA',pris:p,vp:null,orsak:`Månadsinsättning ${manSEK.toLocaleString('sv-SE')} kr`});
       }
 
       // SÄLJ: +2% vinst ELLER -2% stop loss
@@ -290,20 +286,20 @@ async function körKalkylator() {
         const vp=(p-tradeEntry)/tradeEntry*100;
         if (vp>=MICRO_VINST*100){
           tradeCash+=tradeCoin*p;
-          trades.push({datum:punkter[i].datum,typ:'SÄLJ',pris:p,vp,orsak:`+${vp.toFixed(1)}% vinst ✓`});
+          trades.push({datum:data[i].datum,typ:'SÄLJ',pris:p,vp,orsak:`+${vp.toFixed(1)}% vinst ✓`});
           tradeCoin=0;tradeEntry=0;
         } else if (vp<=-MICRO_STOPLOSS*100){
           tradeCash+=tradeCoin*p;
-          trades.push({datum:punkter[i].datum,typ:'SÄLJ',pris:p,vp,orsak:`${vp.toFixed(1)}% stop loss`});
+          trades.push({datum:data[i].datum,typ:'SÄLJ',pris:p,vp,orsak:`${vp.toFixed(1)}% stop loss`});
           tradeCoin=0;tradeEntry=0;
         }
       }
 
-      // KÖP: RSI<40 + dipp 0.5% under MA20
+      // KÖP: RSI<40 + 0.5% dipp under MA20
       if (tradeCoin===0&&tradeCash>kapUSD*0.05&&hist.length>=20&&rsi<RSI_KÖP&&avv<=-MICRO_DIPP){
         const bel=tradeCash*MICRO_POSSTRL;
         tradeCoin=bel/p;tradeEntry=p;tradeCash-=bel;
-        trades.push({datum:punkter[i].datum,typ:'KÖP',pris:p,vp:null,orsak:`RSI ${rsi.toFixed(0)} + dipp ${(avv*100).toFixed(1)}% (${intervallLabel})`});
+        trades.push({datum:data[i].datum,typ:'KÖP',pris:p,vp:null,orsak:`RSI ${rsi.toFixed(0)} + dipp ${(avv*100).toFixed(1)}%`});
       }
 
       botVals.push(Math.round(((basCoin+tradeCoin)*p+tradeCash)*USD_SEK));
@@ -311,36 +307,28 @@ async function körKalkylator() {
       insattVals.push(Math.round(totInsatt));
     }
 
-    // ── Dagliga graf-punkter (en per dag) ────────────
-    const dagIndex=[];let sistaD='';
-    punkter.forEach((d,i)=>{if(d.datum!==sistaD){dagIndex.push(i);sistaD=d.datum;}});
-    const labels     = dagIndex.map(i=>punkter[i].datum);
-    const botDaglig  = dagIndex.map(i=>botVals[i]);
-    const hodlDaglig = dagIndex.map(i=>hodlVals[i]);
-    const insattDagl = dagIndex.map(i=>insattVals[i]);
-
     // ── Slutresultat ──────────────────────────────────
-    const slutPris  = priser[priser.length-1];
-    const slutBot   = ((basCoin+tradeCoin)*slutPris+tradeCash)*USD_SEK;
-    const slutHodl  = hodlCoin*slutPris*USD_SEK;
-    const botPnl    = slutBot-totInsatt;
-    const botPct    = botPnl/totInsatt*100;
-    const hodlPct   = (slutHodl-kapSEK)/kapSEK*100;
-    const bankPct   = dagar/365*2.5;
+    const labels=data.map(d=>d.datum);
+    const slutPris=priser[priser.length-1];
+    const slutBot=((basCoin+tradeCoin)*slutPris+tradeCash)*USD_SEK;
+    const slutHodl=hodlCoin*slutPris*USD_SEK;
+    const botPnl=slutBot-totInsatt,botPct=botPnl/totInsatt*100;
+    const hodlPct=(slutHodl-kapSEK)/kapSEK*100;
+    const bankPct=dagar/365*2.5;
 
     let peak=botVals[0]||0,maxDD=0;
     for (const v of botVals){if(v>peak)peak=v;const dd=peak>0?(peak-v)/peak*100:0;if(dd>maxDD)maxDD=dd;}
 
-    const säljTrades  = trades.filter(t=>t.typ==='SÄLJ');
-    const vinstSälj   = säljTrades.filter(t=>t.vp!==null&&t.vp>0);
-    const microKöp    = trades.filter(t=>t.typ==='KÖP'&&t.orsak.includes(intervallLabel));
+    const säljTrades=trades.filter(t=>t.typ==='SÄLJ');
+    const vinstSälj=säljTrades.filter(t=>t.vp!==null&&t.vp>0);
+    const köpTrades=trades.filter(t=>t.typ==='KÖP');
 
-    // ── UI ────────────────────────────────────────────
+    // ── Visa resultat ─────────────────────────────────
     document.getElementById('result-big').innerHTML=`
       <div class="result-card highlight">
         <div class="result-label">SLUTVÄRDE (BOT)</div>
         <div class="result-value gold">${Math.round(slutBot).toLocaleString('sv-SE')} kr</div>
-        <div class="result-sub">Insatt: ${Math.round(totInsatt).toLocaleString('sv-SE')} kr · Data: ${intervallLabel}</div>
+        <div class="result-sub">Insatt: ${Math.round(totInsatt).toLocaleString('sv-SE')} kr · ${data.length} dagar data</div>
       </div>
       <div class="result-card ${botPct>=0?'green-bg':'red-bg'}">
         <div class="result-label">BOTENS AVKASTNING</div>
@@ -350,7 +338,7 @@ async function körKalkylator() {
       <div class="result-card ${hodlPct>=0?'blue-bg':'red-bg'}">
         <div class="result-label">HODL HADE GETT</div>
         <div class="result-value blue">${hodlPct>=0?'+':''}${hodlPct.toFixed(1)}%</div>
-        <div class="result-sub">Bara köp dag 1</div>
+        <div class="result-sub">Bara köp dag 1, inget mer</div>
       </div>
       <div class="result-card">
         <div class="result-label">SPARKONTO (2.5%/år)</div>
@@ -363,25 +351,29 @@ async function körKalkylator() {
         <div class="result-sub">Värsta tillfälliga nedgång</div>
       </div>
       <div class="result-card">
-        <div class="result-label">MICRO TRADES</div>
-        <div class="result-value gold">${säljTrades.length}</div>
-        <div class="result-sub">${vinstSälj.length} vinst · ${säljTrades.length-vinstSälj.length} stop loss · ${microKöp.length} köp</div>
+        <div class="result-label">AFFÄRER</div>
+        <div class="result-value gold">${trades.length}</div>
+        <div class="result-sub">${köpTrades.length} köp · ${säljTrades.length} sälj (${vinstSälj.length} med vinst)</div>
       </div>`;
 
+    // ── Graf ──────────────────────────────────────────
     if (calcChart) calcChart.destroy();
     calcChart=new Chart(document.getElementById('calcChart'),{
       type:'line',data:{labels,datasets:[
-        {label:'Bot (50% bas + micro)',data:botDaglig, borderColor:'#f59e0b',borderWidth:2,  pointRadius:0,tension:0.3,fill:true, backgroundColor:'rgba(245,158,11,0.08)'},
-        {label:'HODL (bara dag 1)',   data:hodlDaglig,borderColor:'#60a5fa',borderWidth:1.5,pointRadius:0,tension:0.3,fill:false,borderDash:[5,4]},
-        {label:'Insatt kapital',      data:insattDagl,borderColor:'#3a3a50',borderWidth:1,  pointRadius:0,tension:0,  fill:false,borderDash:[2,3]},
+        {label:'Bot (50% bas + micro)',data:botVals, borderColor:'#f59e0b',borderWidth:2,  pointRadius:0,tension:0.3,fill:true, backgroundColor:'rgba(245,158,11,0.08)'},
+        {label:'HODL (bara dag 1)',   data:hodlVals,borderColor:'#60a5fa',borderWidth:1.5,pointRadius:0,tension:0.3,fill:false,borderDash:[5,4]},
+        {label:'Insatt kapital',      data:insattVals,borderColor:'#3a3a50',borderWidth:1,pointRadius:0,tension:0,fill:false,borderDash:[2,3]},
       ]},
-      options:{responsive:true,maintainAspectRatio:false,
+      options:{
+        responsive:true,maintainAspectRatio:false,
         plugins:{legend:{display:true,labels:{color:'#6b6b88',font:{size:11},boxWidth:12}},tooltip:{backgroundColor:'#13131a',borderColor:'#22222e',borderWidth:1,titleColor:'#6b6b88',bodyColor:'#f0f0f8',callbacks:{label:ctx=>`${ctx.dataset.label}: ${Math.round(ctx.parsed.y).toLocaleString('sv-SE')} kr`}}},
         scales:{x:{ticks:{color:'#3a3a50',font:{size:10},maxTicksLimit:8},grid:{color:'#1a1a24'}},y:{ticks:{color:'#3a3a50',font:{size:10},callback:v=>Math.round(v).toLocaleString('sv-SE')+' kr'},grid:{color:'#1a1a24'}}}
       },
     });
 
-    document.getElementById('trades-count-label').textContent=`${trades.length} affärer · ${microKöp.length} köp · ${säljTrades.length} sälj (${vinstSälj.length} vinst)`;
+    // ── Affärslista ───────────────────────────────────
+    document.getElementById('trades-count-label').textContent=
+      `${trades.length} affärer · ${köpTrades.length} köp · ${säljTrades.length} sälj (${vinstSälj.length} vinst)`;
     document.getElementById('trades-mini').innerHTML=
       '<div class="trade-row-mini" style="color:var(--muted);font-size:10px;border-bottom:1px solid var(--border);padding-bottom:6px;">'+
       '<span>DATUM</span><span>TYP</span><span>PRIS</span><span>VINST</span><span>ORSAK</span></div>'+
