@@ -256,25 +256,27 @@ function byttSymbol(sym, btn) {
   uppdateraLive();
 }
 
-// ── KORREKT SIMULERING ─────────────────────────────────
+// ── AKTIV TRADING SIMULERING ───────────────────────────
 //
-//  Matematisk modell:
+//  Detta är en korrekt simulering av vår faktiska bot:
 //
-//  totInsattSEK = ALLT du betalat (start + DCA + dipp)
-//  coin         = ALLT BTC du äger
-//  slutVärde    = coin × slutpris × USD_SEK
-//  avkastning   = (slutVärde - totInsattSEK) / totInsattSEK
+//  KAPITAL: Startar med startkapital som CASH (SEK)
+//  
+//  KÖP-SIGNALER (konverterar cash → BTC):
+//  - RSI < 38 + pris under MA20: Köper 40% av cash
+//  - RSI < 30 (stark dipp): Köper 60% av cash
+//  - Aldrig mer än 80% av cash åt gången (behåller reserv)
 //
-//  Varje krona som spenderas läggs till totInsattSEK.
-//  Inga pengar "försvinner" – antingen är de cash eller BTC.
+//  SÄLJ-SIGNALER (konverterar BTC → cash):
+//  - RSI > 65: Säljer allt BTC om vinst > 2%
+//  - Trailing stop 15%: Säljer allt om pris faller 15% från topp
 //
-//  Strategin:
-//  - Köp hela startkapitalet dag 1
-//  - Köp månadsinsättningen 1 gång/månad
-//  - Köp EXTRA vid dipp >5% under MA20 + RSI<38
-//    (finansieras ur månadsinsättningen, max 50% extra)
-//  - SÄLJ ALDRIG i simuleringen
-//    (DCA är en långsiktig strategi)
+//  MÅNADSINSÄTTNING: Läggs till cash varje 30:e dag
+//
+//  AVKASTNING:
+//  - totInsattSEK = allt vi betalat in (start + månadsinsättningar)
+//  - slutVärde = cash + BTC × slutpris
+//  - avkastning = (slutVärde - totInsattSEK) / totInsattSEK
 
 async function körKalkylator() {
   const kapSEK = parseFloat(document.getElementById('c-kapital').value) || 1000;
@@ -294,29 +296,22 @@ async function körKalkylator() {
     if (priser.length < 10) throw new Error('För lite data');
 
     // ── Portföljstate ─────────────────────────────────
-    let coin         = 0;       // Antal BTC/ETH vi äger
-    let totInsattSEK = 0;       // Totalt insatt i SEK (ökar vid varje köp)
-    let manadDag     = 0;       // Räknare för månadsinsättning
-    let månadsbudget = 0;       // Kvarvarande månadsbudget att använda
+    let cash         = kapUSD;   // Vi börjar med CASH, inte BTC
+    let coin         = 0;        // Antal BTC/ETH vi äger
+    let entry        = 0;        // Genomsnittligt köppris
+    let topp         = 0;        // Högsta pris sedan senaste köp
+    let totInsattSEK = kapSEK;   // Totalt insatt (bara externa insättningar)
+    let manadDag     = 0;
     const trades     = [];
-    const botVals    = [];      // Portföljvärde i SEK per dag
-    const hodlVals   = [];      // HODL-värde per dag
-    const insattVals = [];      // Ackumulerat insatt per dag
+    const botVals    = [];
+    const hodlVals   = [];
+    const insattVals = [];
 
     // HODL-referens: köp för startkapitalet dag 1
     const hodlCoin = kapUSD / priser[0];
 
-    // ── Dag 0: Köp hela startkapitalet ───────────────
-    const startKöp = kapUSD / priser[0];
-    coin         += startKöp;
-    totInsattSEK += kapSEK;    // ← startkapitalet räknas som insatt
-    trades.push({
-      datum: data[0].datum,
-      typ:   'KÖP',
-      pris:  priser[0],
-      köptFör: kapSEK,
-      orsak: `Startinvestering ${kapSEK.toLocaleString('sv-SE')} kr`,
-    });
+    // Realiserad vinst (summerar vinst från avslutade affärer)
+    let realiseradVinst = 0;
 
     // ── Daglig loop ───────────────────────────────────
     for (let i = 0; i < priser.length; i++) {
@@ -324,77 +319,97 @@ async function körKalkylator() {
       const hist = priser.slice(0, i + 1);
       const rsi  = hist.length >= 15 ? beräknaRSI(hist) : 50;
       const ma20 = hist.length >= 20 ? beräknaMA(hist, 20) : p;
-      const avv  = (p - ma20) / ma20;  // Avvikelse från MA20
+      const avv  = (p - ma20) / ma20;
 
-      // ── Månadsinsättning (en gång per 30 dagar) ──
+      // ── 1. Månadsinsättning ──────────────────────────
       manadDag++;
       if (manadDag >= 30 && manUSD > 0) {
-        manadDag     = 0;
-        månadsbudget = manUSD; // Fyll på månadsbudgeten
-
-        // Köp direkt med hela månadsinsättningen
-        const mängd   = manUSD / p;
-        coin         += mängd;
-        totInsattSEK += manSEK;   // ← månadsinsättning räknas som insatt
-        trades.push({
-          datum:    data[i].datum,
-          typ:      'DCA',
-          pris:     p,
-          köptFör:  manSEK,
-          orsak:    `Månadsinsättning ${manSEK.toLocaleString('sv-SE')} kr`,
-        });
+        cash         += manUSD;
+        totInsattSEK += manSEK;  // ← räknas som insatt kapital
+        manadDag      = 0;
       }
 
-      // ── Dippköp (extra köp vid stor dipp) ────────
-      // Finansieras ur en separat dipp-budget = 50% av månadsinsättning
-      // Denna kostnad räknas SEPARAT och läggs till totInsattSEK
-      if (hist.length >= 20 && avv <= -0.05 && rsi < RSI_KÖP && manUSD > 0) {
-        // Köp mer ju större dipp
-        const dippFaktor  = Math.min(Math.abs(avv) / 0.05, 2); // 1x–2x
-        const dippUSD     = (manUSD * 0.5) * dippFaktor;
-        const dippSEK     = dippUSD * USD_SEK;
-        const mängd       = dippUSD / p;
-        coin             += mängd;
-        totInsattSEK     += dippSEK;  // ← dippköp räknas som insatt
-        trades.push({
-          datum:    data[i].datum,
-          typ:      'KÖP',
-          pris:     p,
-          köptFör:  dippSEK,
-          orsak:    `Dippköp ${(avv*100).toFixed(1)}% under MA20 (RSI ${rsi.toFixed(0)}) ×${dippFaktor.toFixed(1)}`,
-        });
+      // ── 2. Uppdatera trailing stop ───────────────────
+      if (coin > 0 && p > topp) topp = p;
+
+      // ── 3. SÄLJ-logik ────────────────────────────────
+      if (coin > 0) {
+        const vp          = entry > 0 ? (p - entry) / entry * 100 : 0;
+        const stopNivå    = topp * (1 - TRAILING);
+        const trailingHit = p <= stopNivå && topp > 0;
+        const rsiHit      = rsi > RSI_SÄLJ && vp >= 2;
+
+        if (trailingHit || rsiHit) {
+          const intäkt       = coin * p;
+          const vinst        = intäkt - (coin * entry);
+          realiseradVinst   += vinst;
+          cash              += intäkt;
+          const orsak        = trailingHit
+            ? `Trailing stop (${vp.toFixed(1)}% från topp)`
+            : `RSI överköpt (${rsi.toFixed(0)}) +${vp.toFixed(1)}%`;
+          trades.push({ datum: data[i].datum, typ: 'SÄLJ', pris: p, vp, orsak });
+          coin  = 0;
+          entry = 0;
+          topp  = 0;
+        }
       }
 
-      // ── Portföljvärde ────────────────────────────
-      // = alla coins vi äger × dagens pris × valutakurs
-      const dagsvärde = coin * p * USD_SEK;
+      // ── 4. KÖP-logik ─────────────────────────────────
+      // Köper bara om vi har tillräckligt med cash
+      if (cash > kapUSD * 0.05 && hist.length >= 20) {
+
+        // Stark köpsignal: RSI < 30 (extremt översålt)
+        if (rsi < 30 && avv <= -0.03) {
+          const belopp = cash * 0.6;  // Köp 60% av cash
+          const mängd  = belopp / p;
+          entry        = coin > 0 ? (entry * coin + p * mängd) / (coin + mängd) : p;
+          coin        += mängd;
+          cash        -= belopp;
+          topp         = Math.max(topp, p);
+          trades.push({ datum: data[i].datum, typ: 'KÖP', pris: p, vp: null, orsak: `Stark köpsignal RSI ${rsi.toFixed(0)} (extremt översålt)` });
+        }
+        // Normal köpsignal: RSI < 38 + dipp
+        else if (rsi < RSI_KÖP && avv <= -0.05) {
+          const belopp = cash * 0.4;  // Köp 40% av cash
+          const mängd  = belopp / p;
+          entry        = coin > 0 ? (entry * coin + p * mängd) / (coin + mängd) : p;
+          coin        += mängd;
+          cash        -= belopp;
+          topp         = Math.max(topp, p);
+          trades.push({ datum: data[i].datum, typ: 'KÖP', pris: p, vp: null, orsak: `Köpsignal RSI ${rsi.toFixed(0)} + dipp ${(avv*100).toFixed(1)}%` });
+        }
+      }
+
+      // ── Portföljvärde dag i ───────────────────────────
+      // = cash (USD) + coin × pris, allt i SEK
+      const dagsvärde = (cash + coin * p) * USD_SEK;
       botVals.push(Math.round(dagsvärde));
       hodlVals.push(Math.round(hodlCoin * p * USD_SEK));
       insattVals.push(Math.round(totInsattSEK));
     }
 
-    // ── Beräkna slutresultat ──────────────────────────
+    // ── Slutresultat ──────────────────────────────────
     const labels    = data.map(d => d.datum);
-    const slutBot   = botVals[botVals.length - 1];
-    const slutHodl  = hodlVals[hodlVals.length - 1];
+    const slutPris  = priser[priser.length - 1];
+    const slutBot   = (cash + coin * slutPris) * USD_SEK;
+    const slutHodl  = hodlCoin * slutPris * USD_SEK;
 
-    // Avkastning = (vad det är värt nu - vad vi betalat) / vad vi betalat
+    // Avkastning = (slutvärde - totalt insatt) / totalt insatt
     const botPnlSEK = slutBot - totInsattSEK;
     const botPct    = (botPnlSEK / totInsattSEK) * 100;
-
-    // HODL-avkastning = bara startkapitalet, inga fler insättningar
-    const hodlPnl   = slutHodl - kapSEK;
-    const hodlPct   = (hodlPnl / kapSEK) * 100;
-
+    const hodlPct   = ((slutHodl - kapSEK) / kapSEK) * 100;
     const bankPct   = (dagar / 365) * 2.5;
 
     // Max drawdown
-    let peak = botVals[0], maxDD = 0;
+    let peak = botVals[0] || 0, maxDD = 0;
     for (const v of botVals) {
       if (v > peak) peak = v;
       const dd = peak > 0 ? (peak - v) / peak * 100 : 0;
       if (dd > maxDD) maxDD = dd;
     }
+
+    const antalKöp  = trades.filter(t => t.typ === 'KÖP').length;
+    const antalSälj = trades.filter(t => t.typ === 'SÄLJ').length;
 
     // ── Visa resultat ─────────────────────────────────
     document.getElementById('result-big').innerHTML = `
@@ -411,7 +426,7 @@ async function körKalkylator() {
       <div class="result-card ${hodlPct >= 0 ? 'blue-bg' : 'red-bg'}">
         <div class="result-label">HODL HADE GETT</div>
         <div class="result-value blue">${hodlPct >= 0 ? '+' : ''}${hodlPct.toFixed(1)}%</div>
-        <div class="result-sub">Bara startkapital dag 1</div>
+        <div class="result-sub">Bara köp dag 1, inget mer</div>
       </div>
       <div class="result-card">
         <div class="result-label">SPARKONTO (2.5%/år)</div>
@@ -424,9 +439,9 @@ async function körKalkylator() {
         <div class="result-sub">Värsta tillfälliga nedgång</div>
       </div>
       <div class="result-card">
-        <div class="result-label">ANTAL KÖP</div>
+        <div class="result-label">AFFÄRER</div>
         <div class="result-value gold">${trades.length}</div>
-        <div class="result-sub">${trades.filter(t=>t.typ==='DCA').length} DCA · ${trades.filter(t=>t.typ==='KÖP').length} dippköp</div>
+        <div class="result-sub">${antalKöp} köp · ${antalSälj} sälj</div>
       </div>`;
 
     // ── Graf ──────────────────────────────────────────
@@ -434,7 +449,7 @@ async function körKalkylator() {
     calcChart = new Chart(document.getElementById('calcChart'), {
       type: 'line',
       data: { labels, datasets: [
-        { label:'Bot (DCA + dippköp)', data:botVals,    borderColor:'#f59e0b', borderWidth:2,   pointRadius:0, tension:0.3, fill:true,  backgroundColor:'rgba(245,158,11,0.08)' },
+        { label:'Bot (aktiv trading)', data:botVals,    borderColor:'#f59e0b', borderWidth:2,   pointRadius:0, tension:0.3, fill:true,  backgroundColor:'rgba(245,158,11,0.08)' },
         { label:'HODL (bara dag 1)',   data:hodlVals,   borderColor:'#60a5fa', borderWidth:1.5, pointRadius:0, tension:0.3, fill:false, borderDash:[5,4] },
         { label:'Insatt kapital',      data:insattVals, borderColor:'#3a3a50', borderWidth:1,   pointRadius:0, tension:0,   fill:false, borderDash:[2,3] },
       ]},
@@ -453,17 +468,19 @@ async function körKalkylator() {
 
     // ── Affärslista ───────────────────────────────────
     document.getElementById('trades-count-label').textContent =
-      `${trades.length} köp totalt · DCA ackumulerar BTC utan att sälja`;
+      `${trades.length} affärer · ${antalKöp} köp · ${antalSälj} sälj`;
 
     document.getElementById('trades-mini').innerHTML =
       '<div class="trade-row-mini" style="color:var(--muted);font-size:10px;letter-spacing:0.05em;border-bottom:1px solid var(--border);padding-bottom:6px;">' +
-      '<span>DATUM</span><span>TYP</span><span>PRIS</span><span>BELOPP</span><span>ORSAK</span></div>' +
+      '<span>DATUM</span><span>TYP</span><span>PRIS</span><span>VINST</span><span>ORSAK</span></div>' +
       trades.slice(-50).reverse().map(t => `
         <div class="trade-row-mini">
           <span>${t.datum}</span>
-          <span><span class="trade-tag ${t.typ==='DCA'?'tag-dca':'tag-buy'}">${t.typ}</span></span>
+          <span><span class="trade-tag ${t.typ==='SÄLJ'?'tag-sell':'tag-buy'}">${t.typ}</span></span>
           <span>$${Math.round(t.pris).toLocaleString()}</span>
-          <span style="color:var(--green)">${Math.round(t.köptFör).toLocaleString('sv-SE')} kr</span>
+          <span style="color:${t.vp===null?'var(--muted)':t.vp>=0?'var(--green)':'var(--red)'}">
+            ${t.vp===null?'–':(t.vp>=0?'+':'')+t.vp.toFixed(1)+'%'}
+          </span>
           <span style="color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${t.orsak}</span>
         </div>`).join('');
 
